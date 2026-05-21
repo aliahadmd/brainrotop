@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">brainrotop</string>
+    <string name="accessibility_service_label">Brainrotop blocker</string>
+    <string name="accessibility_service_summary">Stops short-video loops immediately.</string>
+    <string name="accessibility_service_description">Brainrotop watches app screens for short-video feeds, exits them, and shows a blocker screen.</string>
+</resources>
