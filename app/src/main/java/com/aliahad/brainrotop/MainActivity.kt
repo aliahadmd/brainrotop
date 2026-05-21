@@ -25,6 +25,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -36,11 +37,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.aliahad.brainrotop.detector.ShortVideoDetector
+import com.aliahad.brainrotop.screentime.ScreenTimeConfig
+import com.aliahad.brainrotop.screentime.ScreenTimeSettings
 import com.aliahad.brainrotop.ui.theme.BrainrotopTheme
 
 class MainActivity : ComponentActivity() {
     private var blockerEnabled by mutableStateOf(false)
     private var batteryExempt by mutableStateOf(false)
+    private var screenTimeConfig by mutableStateOf(ScreenTimeConfig())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,6 +60,9 @@ class MainActivity : ComponentActivity() {
                     onOpenBattery = ::openBatterySettings,
                     onOpenXiaomiAutostart = ::openXiaomiAutostart,
                     onTestBlocker = ::openTestBlocker,
+                    screenTimeConfig = screenTimeConfig,
+                    onScreenTimeEnabledChange = ::setScreenTimeEnabled,
+                    onScreenTimeLimitChange = ::setScreenTimeLimitMinutes,
                 )
             }
         }
@@ -69,6 +76,7 @@ class MainActivity : ComponentActivity() {
     private fun refreshStatus() {
         blockerEnabled = AccessibilityStatus.isBlockerEnabled(this)
         batteryExempt = AccessibilityStatus.isIgnoringBatteryOptimizations(this)
+        screenTimeConfig = ScreenTimeSettings.read(this)
     }
 
     private fun openAccessibilitySettings() {
@@ -113,6 +121,16 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun setScreenTimeEnabled(enabled: Boolean) {
+        ScreenTimeSettings.setEnabled(this, enabled)
+        refreshStatus()
+    }
+
+    private fun setScreenTimeLimitMinutes(minutes: Int) {
+        ScreenTimeSettings.setLimitMinutes(this, minutes)
+        refreshStatus()
+    }
+
     private fun safeStart(intent: Intent): Boolean =
         runCatching {
             startActivity(intent)
@@ -128,6 +146,9 @@ private fun DashboardScreen(
     onOpenBattery: () -> Unit,
     onOpenXiaomiAutostart: () -> Unit,
     onTestBlocker: () -> Unit,
+    screenTimeConfig: ScreenTimeConfig,
+    onScreenTimeEnabledChange: (Boolean) -> Unit,
+    onScreenTimeLimitChange: (Int) -> Unit,
 ) {
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -153,6 +174,12 @@ private fun DashboardScreen(
             StatusPanel(
                 blockerEnabled = blockerEnabled,
                 batteryExempt = batteryExempt,
+            )
+
+            ScreenTimePanel(
+                config = screenTimeConfig,
+                onEnabledChange = onScreenTimeEnabledChange,
+                onLimitChange = onScreenTimeLimitChange,
             )
 
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -202,6 +229,77 @@ private fun DashboardScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ScreenTimePanel(
+    config: ScreenTimeConfig,
+    onEnabledChange: (Boolean) -> Unit,
+    onLimitChange: (Int) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = "Screen-Time Limit",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = if (config.enabled) {
+                        "Blocks after ${config.limitMinutes} minutes from screen on."
+                    } else {
+                        "Off. Turn on to limit each screen-on session."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = config.enabled,
+                onCheckedChange = onEnabledChange,
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            OutlinedButton(
+                onClick = { onLimitChange(config.limitMinutes - 1) },
+                enabled = config.limitMinutes > ScreenTimeConfig.MIN_LIMIT_MINUTES,
+                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
+            ) {
+                Text("-")
+            }
+            Text(
+                text = "${config.limitMinutes} min",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            OutlinedButton(
+                onClick = { onLimitChange(config.limitMinutes + 1) },
+                enabled = config.limitMinutes < ScreenTimeConfig.MAX_LIMIT_MINUTES,
+                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
+            ) {
+                Text("+")
+            }
+        }
+
+        Text(
+            text = "A one-minute warning appears before the full-screen block.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -283,4 +381,3 @@ private fun RuleRow(
         Spacer(modifier = Modifier.height(4.dp))
     }
 }
-

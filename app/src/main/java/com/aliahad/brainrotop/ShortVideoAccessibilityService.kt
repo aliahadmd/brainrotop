@@ -1,10 +1,16 @@
 package com.aliahad.brainrotop
 
 import android.accessibilityservice.AccessibilityService
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
@@ -15,23 +21,67 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
+import androidx.core.content.ContextCompat
 import com.aliahad.brainrotop.detector.DetectionResult
 import com.aliahad.brainrotop.detector.NodeSnapshot
 import com.aliahad.brainrotop.detector.ShortVideoDetector
+import com.aliahad.brainrotop.screentime.ScreenTimeAction
+import com.aliahad.brainrotop.screentime.ScreenTimeConfig
+import com.aliahad.brainrotop.screentime.ScreenTimeSessionController
+import com.aliahad.brainrotop.screentime.ScreenTimeSettings
 
 class ShortVideoAccessibilityService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val lastBlockAtByPackage = mutableMapOf<String, Long>()
     private var overlayView: View? = null
+    private var overlayKind: OverlayKind? = null
+    private val screenTimeController = ScreenTimeSessionController()
+    private var screenReceiverRegistered = false
+    private var screenTimePreferences: SharedPreferences? = null
     private val watchdog = object : Runnable {
         override fun run() {
             scanActiveWindow(source = "watchdog")
             mainHandler.postDelayed(this, WATCHDOG_INTERVAL_MS)
         }
     }
+    private val screenTimeWarningRunnable = Runnable {
+        handleScreenTimeActions(
+            screenTimeController.onWarningTimer(nowMs(), screenTimeConfig()),
+        )
+    }
+    private val screenTimeBlockRunnable = Runnable {
+        handleScreenTimeActions(
+            screenTimeController.onBlockTimer(nowMs(), screenTimeConfig()),
+        )
+    }
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_ON -> handleScreenTimeActions(
+                    screenTimeController.onScreenOn(nowMs(), screenTimeConfig()),
+                )
+
+                Intent.ACTION_SCREEN_OFF -> handleScreenTimeActions(
+                    screenTimeController.onScreenOff(),
+                )
+            }
+        }
+    }
+    private val screenTimeSettingsListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (ScreenTimeSettings.isScreenTimeKey(key)) {
+                handleScreenTimeActions(
+                    screenTimeController.onSettingsChanged(nowMs(), screenTimeConfig()),
+                )
+            }
+        }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        registerScreenReceiver()
+        registerScreenTimeSettingsListener()
+        initializeScreenTimeSession()
         mainHandler.removeCallbacks(watchdog)
         mainHandler.post(watchdog)
     }
@@ -59,6 +109,10 @@ class ShortVideoAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(watchdog)
+        mainHandler.removeCallbacks(screenTimeWarningRunnable)
+        mainHandler.removeCallbacks(screenTimeBlockRunnable)
+        unregisterScreenTimeSettingsListener()
+        unregisterScreenReceiver()
         hideOverlay()
         super.onDestroy()
     }
@@ -132,10 +186,16 @@ class ShortVideoAccessibilityService : AccessibilityService() {
     }
 
     private fun showOverlay(result: DetectionResult) {
+        showOverlay(
+            kind = OverlayKind.ShortVideo,
+            view = createShortVideoOverlayView(result),
+        )
+    }
+
+    private fun showOverlay(kind: OverlayKind, view: View) {
         val windowManager = getSystemService(WindowManager::class.java) ?: return
         hideOverlay(windowManager)
 
-        val overlay = createOverlayView(result)
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -148,14 +208,15 @@ class ShortVideoAccessibilityService : AccessibilityService() {
         }
 
         runCatching {
-            windowManager.addView(overlay, params)
-            overlayView = overlay
+            windowManager.addView(view, params)
+            overlayView = view
+            overlayKind = kind
         }.onFailure { error ->
             Log.e(TAG, "Could not show accessibility overlay", error)
         }
     }
 
-    private fun createOverlayView(result: DetectionResult): View {
+    private fun createShortVideoOverlayView(result: DetectionResult): View {
         val density = resources.displayMetrics.density
         fun Int.dp(): Int = (this * density).toInt()
 
@@ -245,8 +306,167 @@ class ShortVideoAccessibilityService : AccessibilityService() {
     private fun hideOverlay(windowManager: WindowManager? = getSystemService(WindowManager::class.java)) {
         val overlay = overlayView ?: return
         overlayView = null
+        overlayKind = null
         runCatching { windowManager?.removeView(overlay) }
     }
+
+    private fun registerScreenReceiver() {
+        if (screenReceiverRegistered) return
+
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        ContextCompat.registerReceiver(
+            this,
+            screenReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        screenReceiverRegistered = true
+    }
+
+    private fun unregisterScreenReceiver() {
+        if (!screenReceiverRegistered) return
+
+        runCatching { unregisterReceiver(screenReceiver) }
+        screenReceiverRegistered = false
+    }
+
+    private fun registerScreenTimeSettingsListener() {
+        if (screenTimePreferences != null) return
+
+        screenTimePreferences = ScreenTimeSettings.preferences(this).also { preferences ->
+            preferences.registerOnSharedPreferenceChangeListener(screenTimeSettingsListener)
+        }
+    }
+
+    private fun unregisterScreenTimeSettingsListener() {
+        screenTimePreferences?.unregisterOnSharedPreferenceChangeListener(screenTimeSettingsListener)
+        screenTimePreferences = null
+    }
+
+    private fun initializeScreenTimeSession() {
+        val powerManager = getSystemService(PowerManager::class.java)
+        val actions = if (powerManager?.isInteractive == true) {
+            screenTimeController.onScreenOn(nowMs(), screenTimeConfig())
+        } else {
+            screenTimeController.onScreenOff()
+        }
+        handleScreenTimeActions(actions)
+    }
+
+    private fun handleScreenTimeActions(actions: List<ScreenTimeAction>) {
+        actions.forEach { action ->
+            when (action) {
+                is ScreenTimeAction.ScheduleWarning -> {
+                    mainHandler.removeCallbacks(screenTimeWarningRunnable)
+                    mainHandler.postDelayed(screenTimeWarningRunnable, action.delayMs)
+                }
+
+                is ScreenTimeAction.ScheduleBlock -> {
+                    mainHandler.removeCallbacks(screenTimeBlockRunnable)
+                    mainHandler.postDelayed(screenTimeBlockRunnable, action.delayMs)
+                }
+
+                ScreenTimeAction.CancelWarning -> {
+                    mainHandler.removeCallbacks(screenTimeWarningRunnable)
+                }
+
+                ScreenTimeAction.CancelBlock -> {
+                    mainHandler.removeCallbacks(screenTimeBlockRunnable)
+                }
+
+                ScreenTimeAction.ShowWarning -> {
+                    Toast.makeText(
+                        this,
+                        "1 minute left before screen-time block.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+
+                ScreenTimeAction.ShowBlock -> {
+                    Log.i(TAG, "Blocking screen-time session limit")
+                    performGlobalAction(GLOBAL_ACTION_HOME)
+                    mainHandler.postDelayed(
+                        { showScreenTimeBlockOverlay(screenTimeConfig()) },
+                        SCREEN_TIME_OVERLAY_DELAY_MS,
+                    )
+                }
+
+                ScreenTimeAction.HideBlock -> {
+                    if (overlayKind == OverlayKind.ScreenTime) hideOverlay()
+                }
+            }
+        }
+    }
+
+    private fun showScreenTimeBlockOverlay(config: ScreenTimeConfig) {
+        showOverlay(
+            kind = OverlayKind.ScreenTime,
+            view = createScreenTimeOverlayView(config),
+        )
+    }
+
+    private fun createScreenTimeOverlayView(config: ScreenTimeConfig): View {
+        val density = resources.displayMetrics.density
+        fun Int.dp(): Int = (this * density).toInt()
+
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(28.dp(), 42.dp(), 28.dp(), 42.dp())
+            setBackgroundColor(Color.rgb(250, 248, 244))
+
+            addView(
+                TextView(context).apply {
+                    text = "Time is up"
+                    textSize = 40f
+                    setTextColor(Color.rgb(126, 48, 33))
+                    gravity = Gravity.CENTER
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+
+            addView(
+                TextView(context).apply {
+                    text = "${config.limitMinutes} minute screen session reached"
+                    textSize = 22f
+                    setTextColor(Color.rgb(35, 31, 27))
+                    gravity = Gravity.CENTER
+                    setPadding(0, 18.dp(), 0, 0)
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+
+            addView(
+                TextView(context).apply {
+                    text = "Turn the screen off to reset this session."
+                    textSize = 19f
+                    setTextColor(Color.rgb(80, 69, 61))
+                    gravity = Gravity.CENTER
+                    setPadding(0, 24.dp(), 0, 0)
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+    }
+
+    private fun screenTimeConfig(): ScreenTimeConfig =
+        ScreenTimeSettings.read(this)
+
+    private fun nowMs(): Long = SystemClock.elapsedRealtime()
 
     private fun combineSnapshots(
         packageName: String,
@@ -308,6 +528,11 @@ class ShortVideoAccessibilityService : AccessibilityService() {
 
     private class NodeCounter(var count: Int = 0)
 
+    private enum class OverlayKind {
+        ShortVideo,
+        ScreenTime,
+    }
+
     companion object {
         private const val MAX_TREE_DEPTH = 9
         private const val MAX_TREE_NODES = 300
@@ -315,6 +540,7 @@ class ShortVideoAccessibilityService : AccessibilityService() {
         private const val BLOCK_DEBOUNCE_MS = 700L
         private const val WECHAT_EXIT_DELAY_MS = 180L
         private const val LAUNCH_BLOCKER_DELAY_MS = 320L
+        private const val SCREEN_TIME_OVERLAY_DELAY_MS = 120L
         private const val WECHAT_CHANNELS_RULE_ID = "wechat_channels"
         private const val TAG = "BrainrotopBlocker"
     }
