@@ -94,6 +94,16 @@ class ShortVideoDetectorTest {
         assertNull(result)
     }
 
+    @Test
+    fun twitterVideoDoesNotBlock() {
+        val result = ShortVideoDetector.detect(
+            packageName = "com.twitter.android",
+            root = screen("Video player", "Like", "Comment", "Share", "For you"),
+        )
+
+        assertNull(result)
+    }
+
     private fun screen(vararg texts: String): NodeSnapshot =
         NodeSnapshot(
             packageName = "root",

@@ -6,5 +6,5 @@
     android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_service_description"
     android:notificationTimeout="0"
-    android:packageNames="com.tencent.mm,com.google.android.youtube,com.facebook.katana,com.instagram.android,com.instagram.barcelona,com.xingin.xhs,com.reddit.frontpage,com.twitter.android,com.zhiliaoapp.musically,com.ss.android.ugc.aweme,com.ss.android.ugc.aweme.lite,com.smile.gifmaker,com.kuaishou.nebula"
+    android:packageNames="com.tencent.mm,com.google.android.youtube,com.facebook.katana,com.instagram.android,com.instagram.barcelona,com.xingin.xhs,com.reddit.frontpage,com.zhiliaoapp.musically,com.ss.android.ugc.aweme,com.ss.android.ugc.aweme.lite,com.smile.gifmaker,com.kuaishou.nebula"
     android:summary="@string/accessibility_service_summary" />

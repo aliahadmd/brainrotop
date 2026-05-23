@@ -60,12 +60,6 @@ object ShortVideoDetector {
             mode = RuleMode.MixedShortVideoSurface,
         ),
         AppRule(
-            id = "x_video",
-            appLabel = "X Video",
-            packageNames = setOf("com.twitter.android"),
-            mode = RuleMode.MixedShortVideoSurface,
-        ),
-        AppRule(
             id = "dedicated_short_video",
             appLabel = "Short-video app",
             packageNames = setOf(
@@ -178,7 +172,6 @@ object ShortVideoDetector {
             "com.instagram.android", "com.instagram.barcelona" -> listOf("reels", "reel")
             "com.xingin.xhs" -> listOf("视频", "小红书视频", "弹幕", "沉浸")
             "com.reddit.frontpage" -> listOf("shorts", "reels", "video player", "watch more videos")
-            "com.twitter.android" -> listOf("video player", "immersive video", "reels")
             else -> listOf("shorts", "reels", "short video")
         }
 
