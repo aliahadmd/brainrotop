@@ -1,6 +1,8 @@
 package com.aliahad.brainrotop
 
 import android.accessibilityservice.AccessibilityService
+import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -21,8 +23,10 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
 import androidx.core.content.ContextCompat
+import com.aliahad.brainrotop.analytics.AnalyticsRepository
+import com.aliahad.brainrotop.analytics.ScreenSessionEndReason
+import com.aliahad.brainrotop.analytics.ScreenSessionTracker
 import com.aliahad.brainrotop.detector.DetectionResult
 import com.aliahad.brainrotop.detector.NodeSnapshot
 import com.aliahad.brainrotop.detector.ShortVideoDetector
@@ -30,13 +34,20 @@ import com.aliahad.brainrotop.screentime.ScreenTimeAction
 import com.aliahad.brainrotop.screentime.ScreenTimeConfig
 import com.aliahad.brainrotop.screentime.ScreenTimeSessionController
 import com.aliahad.brainrotop.screentime.ScreenTimeSettings
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class ShortVideoAccessibilityService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val analyticsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val analyticsRepository by lazy { AnalyticsRepository.get(this) }
     private val lastBlockAtByPackage = mutableMapOf<String, Long>()
     private var overlayView: View? = null
     private var overlayKind: OverlayKind? = null
     private val screenTimeController = ScreenTimeSessionController()
+    private val screenSessionTracker = ScreenSessionTracker()
     private var screenReceiverRegistered = false
     private var screenTimePreferences: SharedPreferences? = null
     private val watchdog = object : Runnable {
@@ -55,16 +66,25 @@ class ShortVideoAccessibilityService : AccessibilityService() {
             screenTimeController.onBlockTimer(nowMs(), screenTimeConfig()),
         )
     }
+    private val warningOverlayHideRunnable = Runnable {
+        if (overlayKind == OverlayKind.ScreenTimeWarning) hideOverlay()
+    }
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-                Intent.ACTION_SCREEN_ON -> handleScreenTimeActions(
-                    screenTimeController.onScreenOn(nowMs(), screenTimeConfig()),
-                )
+                Intent.ACTION_SCREEN_ON -> {
+                    startScreenSession()
+                    handleScreenTimeActions(
+                        screenTimeController.onScreenOn(nowMs(), screenTimeConfig()),
+                    )
+                }
 
-                Intent.ACTION_SCREEN_OFF -> handleScreenTimeActions(
-                    screenTimeController.onScreenOff(),
-                )
+                Intent.ACTION_SCREEN_OFF -> {
+                    recordScreenSessionEnd(ScreenSessionEndReason.SCREEN_OFF)
+                    handleScreenTimeActions(
+                        screenTimeController.onScreenOff(),
+                    )
+                }
             }
         }
     }
@@ -111,6 +131,8 @@ class ShortVideoAccessibilityService : AccessibilityService() {
         mainHandler.removeCallbacks(watchdog)
         mainHandler.removeCallbacks(screenTimeWarningRunnable)
         mainHandler.removeCallbacks(screenTimeBlockRunnable)
+        mainHandler.removeCallbacks(warningOverlayHideRunnable)
+        recordScreenSessionEnd(ScreenSessionEndReason.SERVICE_STOPPED)
         unregisterScreenTimeSettingsListener()
         unregisterScreenReceiver()
         hideOverlay()
@@ -164,6 +186,7 @@ class ShortVideoAccessibilityService : AccessibilityService() {
     }
 
     private fun block(result: DetectionResult) {
+        recordShortVideoBlock(result)
         exitBlockedScreen(result)
         mainHandler.postDelayed(
             {
@@ -219,18 +242,19 @@ class ShortVideoAccessibilityService : AccessibilityService() {
     private fun createShortVideoOverlayView(result: DetectionResult): View {
         val density = resources.displayMetrics.density
         fun Int.dp(): Int = (this * density).toInt()
+        val colors = overlayColors(OverlayTone.Calm)
 
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(28.dp(), 42.dp(), 28.dp(), 42.dp())
-            setBackgroundColor(Color.rgb(248, 252, 247))
+            setBackgroundColor(colors.background)
 
             addView(
                 TextView(context).apply {
                     text = "Stopped"
                     textSize = 42f
-                    setTextColor(Color.rgb(24, 92, 64))
+                    setTextColor(colors.accent)
                     gravity = Gravity.CENTER
                     typeface = android.graphics.Typeface.DEFAULT_BOLD
                 },
@@ -244,7 +268,7 @@ class ShortVideoAccessibilityService : AccessibilityService() {
                 TextView(context).apply {
                     text = result.appLabel
                     textSize = 24f
-                    setTextColor(Color.rgb(27, 35, 31))
+                    setTextColor(colors.primaryText)
                     gravity = Gravity.CENTER
                     setPadding(0, 18.dp(), 0, 0)
                     typeface = android.graphics.Typeface.DEFAULT_BOLD
@@ -259,7 +283,7 @@ class ShortVideoAccessibilityService : AccessibilityService() {
                 TextView(context).apply {
                     text = result.reason
                     textSize = 17f
-                    setTextColor(Color.rgb(83, 98, 91))
+                    setTextColor(colors.secondaryText)
                     gravity = Gravity.CENTER
                     setPadding(0, 10.dp(), 0, 0)
                 },
@@ -273,7 +297,7 @@ class ShortVideoAccessibilityService : AccessibilityService() {
                 TextView(context).apply {
                     text = "Take one minute. Drink water. Stand up. Let the loop break here."
                     textSize = 19f
-                    setTextColor(Color.rgb(47, 79, 62))
+                    setTextColor(colors.primaryText)
                     gravity = Gravity.CENTER
                     setPadding(0, 28.dp(), 0, 28.dp())
                 },
@@ -287,6 +311,8 @@ class ShortVideoAccessibilityService : AccessibilityService() {
                 Button(context).apply {
                     text = "Back to Home"
                     textSize = 17f
+                    backgroundTintList = ColorStateList.valueOf(colors.buttonBackground)
+                    setTextColor(colors.buttonText)
                     setOnClickListener {
                         hideOverlay()
                         performGlobalAction(GLOBAL_ACTION_HOME)
@@ -305,6 +331,7 @@ class ShortVideoAccessibilityService : AccessibilityService() {
 
     private fun hideOverlay(windowManager: WindowManager? = getSystemService(WindowManager::class.java)) {
         val overlay = overlayView ?: return
+        mainHandler.removeCallbacks(warningOverlayHideRunnable)
         overlayView = null
         overlayKind = null
         runCatching { windowManager?.removeView(overlay) }
@@ -349,6 +376,7 @@ class ShortVideoAccessibilityService : AccessibilityService() {
     private fun initializeScreenTimeSession() {
         val powerManager = getSystemService(PowerManager::class.java)
         val actions = if (powerManager?.isInteractive == true) {
+            startScreenSession()
             screenTimeController.onScreenOn(nowMs(), screenTimeConfig())
         } else {
             screenTimeController.onScreenOff()
@@ -371,6 +399,8 @@ class ShortVideoAccessibilityService : AccessibilityService() {
 
                 ScreenTimeAction.CancelWarning -> {
                     mainHandler.removeCallbacks(screenTimeWarningRunnable)
+                    mainHandler.removeCallbacks(warningOverlayHideRunnable)
+                    if (overlayKind == OverlayKind.ScreenTimeWarning) hideOverlay()
                 }
 
                 ScreenTimeAction.CancelBlock -> {
@@ -378,18 +408,18 @@ class ShortVideoAccessibilityService : AccessibilityService() {
                 }
 
                 ScreenTimeAction.ShowWarning -> {
-                    Toast.makeText(
-                        this,
-                        "1 minute left before screen-time block.",
-                        Toast.LENGTH_LONG,
-                    ).show()
+                    val config = screenTimeConfig()
+                    recordScreenTimeWarning(config)
+                    showScreenTimeWarningOverlay(config)
                 }
 
                 ScreenTimeAction.ShowBlock -> {
+                    val config = screenTimeConfig()
+                    recordScreenTimeBlock(config)
                     Log.i(TAG, "Blocking screen-time session limit")
                     performGlobalAction(GLOBAL_ACTION_HOME)
                     mainHandler.postDelayed(
-                        { showScreenTimeBlockOverlay(screenTimeConfig()) },
+                        { showScreenTimeBlockOverlay(config) },
                         SCREEN_TIME_OVERLAY_DELAY_MS,
                     )
                 }
@@ -401,6 +431,16 @@ class ShortVideoAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun showScreenTimeWarningOverlay(config: ScreenTimeConfig) {
+        if (overlayView != null) return
+
+        showOverlay(
+            kind = OverlayKind.ScreenTimeWarning,
+            view = createScreenTimeWarningOverlayView(config),
+        )
+        mainHandler.postDelayed(warningOverlayHideRunnable, WARNING_OVERLAY_DURATION_MS)
+    }
+
     private fun showScreenTimeBlockOverlay(config: ScreenTimeConfig) {
         showOverlay(
             kind = OverlayKind.ScreenTime,
@@ -408,21 +448,63 @@ class ShortVideoAccessibilityService : AccessibilityService() {
         )
     }
 
-    private fun createScreenTimeOverlayView(config: ScreenTimeConfig): View {
+    private fun createScreenTimeWarningOverlayView(config: ScreenTimeConfig): View {
         val density = resources.displayMetrics.density
         fun Int.dp(): Int = (this * density).toInt()
+        val colors = overlayColors(OverlayTone.Warning)
 
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(28.dp(), 42.dp(), 28.dp(), 42.dp())
-            setBackgroundColor(Color.rgb(250, 248, 244))
+            setBackgroundColor(colors.background)
+
+            addView(
+                TextView(context).apply {
+                    text = "1 minute left"
+                    textSize = 36f
+                    setTextColor(colors.accent)
+                    gravity = Gravity.CENTER
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+
+            addView(
+                TextView(context).apply {
+                    text = "${config.limitMinutes} minute screen session is almost done"
+                    textSize = 19f
+                    setTextColor(colors.primaryText)
+                    gravity = Gravity.CENTER
+                    setPadding(0, 18.dp(), 0, 0)
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+        }
+    }
+
+    private fun createScreenTimeOverlayView(config: ScreenTimeConfig): View {
+        val density = resources.displayMetrics.density
+        fun Int.dp(): Int = (this * density).toInt()
+        val colors = overlayColors(OverlayTone.Stop)
+
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(28.dp(), 42.dp(), 28.dp(), 42.dp())
+            setBackgroundColor(colors.background)
 
             addView(
                 TextView(context).apply {
                     text = "Time is up"
                     textSize = 40f
-                    setTextColor(Color.rgb(126, 48, 33))
+                    setTextColor(colors.accent)
                     gravity = Gravity.CENTER
                     typeface = android.graphics.Typeface.DEFAULT_BOLD
                 },
@@ -436,7 +518,7 @@ class ShortVideoAccessibilityService : AccessibilityService() {
                 TextView(context).apply {
                     text = "${config.limitMinutes} minute screen session reached"
                     textSize = 22f
-                    setTextColor(Color.rgb(35, 31, 27))
+                    setTextColor(colors.primaryText)
                     gravity = Gravity.CENTER
                     setPadding(0, 18.dp(), 0, 0)
                     typeface = android.graphics.Typeface.DEFAULT_BOLD
@@ -451,7 +533,7 @@ class ShortVideoAccessibilityService : AccessibilityService() {
                 TextView(context).apply {
                     text = "Turn the screen off to reset this session."
                     textSize = 19f
-                    setTextColor(Color.rgb(80, 69, 61))
+                    setTextColor(colors.secondaryText)
                     gravity = Gravity.CENTER
                     setPadding(0, 24.dp(), 0, 0)
                 },
@@ -467,6 +549,115 @@ class ShortVideoAccessibilityService : AccessibilityService() {
         ScreenTimeSettings.read(this)
 
     private fun nowMs(): Long = SystemClock.elapsedRealtime()
+
+    private fun wallTimeMs(): Long = System.currentTimeMillis()
+
+    private fun startScreenSession() {
+        screenSessionTracker.onScreenOn(
+            startedAtWallMs = wallTimeMs(),
+            startedAtElapsedMs = nowMs(),
+            limitMinutes = screenTimeConfig().limitMinutes,
+        )
+    }
+
+    private fun recordScreenSessionEnd(reason: ScreenSessionEndReason) {
+        val session = screenSessionTracker.onScreenOff(
+            endedAtWallMs = wallTimeMs(),
+            endedAtElapsedMs = nowMs(),
+            endReason = reason,
+        ) ?: return
+
+        analyticsScope.launch {
+            analyticsRepository.recordSession(session)
+        }
+    }
+
+    private fun recordShortVideoBlock(result: DetectionResult) {
+        analyticsScope.launch {
+            analyticsRepository.recordShortVideoBlock(result)
+        }
+    }
+
+    private fun recordScreenTimeWarning(config: ScreenTimeConfig) {
+        analyticsScope.launch {
+            analyticsRepository.recordScreenTimeWarning(config)
+        }
+    }
+
+    private fun recordScreenTimeBlock(config: ScreenTimeConfig) {
+        analyticsScope.launch {
+            analyticsRepository.recordScreenTimeBlock(config)
+        }
+    }
+
+    private fun overlayColors(tone: OverlayTone): OverlayColors {
+        val dark = isDarkMode()
+        return when (tone) {
+            OverlayTone.Calm -> if (dark) {
+                OverlayColors(
+                    background = Color.rgb(13, 22, 18),
+                    primaryText = Color.rgb(232, 241, 236),
+                    secondaryText = Color.rgb(169, 186, 177),
+                    accent = Color.rgb(126, 211, 176),
+                    buttonBackground = Color.rgb(126, 211, 176),
+                    buttonText = Color.rgb(4, 27, 18),
+                )
+            } else {
+                OverlayColors(
+                    background = Color.rgb(246, 250, 247),
+                    primaryText = Color.rgb(27, 35, 31),
+                    secondaryText = Color.rgb(83, 98, 91),
+                    accent = Color.rgb(24, 92, 64),
+                    buttonBackground = Color.rgb(24, 92, 64),
+                    buttonText = Color.WHITE,
+                )
+            }
+
+            OverlayTone.Warning -> if (dark) {
+                OverlayColors(
+                    background = Color.rgb(28, 22, 12),
+                    primaryText = Color.rgb(246, 236, 215),
+                    secondaryText = Color.rgb(210, 188, 145),
+                    accent = Color.rgb(239, 190, 103),
+                    buttonBackground = Color.rgb(239, 190, 103),
+                    buttonText = Color.rgb(34, 22, 4),
+                )
+            } else {
+                OverlayColors(
+                    background = Color.rgb(255, 250, 238),
+                    primaryText = Color.rgb(49, 40, 24),
+                    secondaryText = Color.rgb(100, 83, 48),
+                    accent = Color.rgb(132, 81, 17),
+                    buttonBackground = Color.rgb(132, 81, 17),
+                    buttonText = Color.WHITE,
+                )
+            }
+
+            OverlayTone.Stop -> if (dark) {
+                OverlayColors(
+                    background = Color.rgb(30, 17, 16),
+                    primaryText = Color.rgb(248, 232, 228),
+                    secondaryText = Color.rgb(218, 180, 173),
+                    accent = Color.rgb(248, 143, 124),
+                    buttonBackground = Color.rgb(248, 143, 124),
+                    buttonText = Color.rgb(45, 11, 7),
+                )
+            } else {
+                OverlayColors(
+                    background = Color.rgb(255, 248, 245),
+                    primaryText = Color.rgb(45, 32, 28),
+                    secondaryText = Color.rgb(99, 74, 67),
+                    accent = Color.rgb(139, 50, 34),
+                    buttonBackground = Color.rgb(139, 50, 34),
+                    buttonText = Color.WHITE,
+                )
+            }
+        }
+    }
+
+    private fun isDarkMode(): Boolean =
+        (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
 
     private fun combineSnapshots(
         packageName: String,
@@ -530,8 +721,24 @@ class ShortVideoAccessibilityService : AccessibilityService() {
 
     private enum class OverlayKind {
         ShortVideo,
+        ScreenTimeWarning,
         ScreenTime,
     }
+
+    private enum class OverlayTone {
+        Calm,
+        Warning,
+        Stop,
+    }
+
+    private data class OverlayColors(
+        val background: Int,
+        val primaryText: Int,
+        val secondaryText: Int,
+        val accent: Int,
+        val buttonBackground: Int,
+        val buttonText: Int,
+    )
 
     companion object {
         private const val MAX_TREE_DEPTH = 9
@@ -541,6 +748,7 @@ class ShortVideoAccessibilityService : AccessibilityService() {
         private const val WECHAT_EXIT_DELAY_MS = 180L
         private const val LAUNCH_BLOCKER_DELAY_MS = 320L
         private const val SCREEN_TIME_OVERLAY_DELAY_MS = 120L
+        private const val WARNING_OVERLAY_DURATION_MS = 4_500L
         private const val WECHAT_CHANNELS_RULE_ID = "wechat_channels"
         private const val TAG = "BrainrotopBlocker"
     }
