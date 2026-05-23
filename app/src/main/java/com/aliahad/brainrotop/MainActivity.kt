@@ -4,6 +4,8 @@ import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -21,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -61,17 +64,25 @@ import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     private val analyticsRepository by lazy { AnalyticsRepository.get(this) }
+    private val refreshHandler = Handler(Looper.getMainLooper())
     private var blockerEnabled by mutableStateOf(false)
     private var batteryExempt by mutableStateOf(false)
     private var screenTimeConfig by mutableStateOf(ScreenTimeConfig())
     private var analyticsSummary by mutableStateOf(AnalyticsSummary.empty())
     private var analyticsLoading by mutableStateOf(true)
+    private val analyticsRefreshRunnable = object : Runnable {
+        override fun run() {
+            refreshStatus()
+            refreshAnalytics(showLoading = false)
+            refreshHandler.postDelayed(this, ANALYTICS_REFRESH_INTERVAL_MS)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         refreshStatus()
-        refreshAnalytics()
+        refreshAnalytics(showLoading = true)
 
         setContent {
             BrainrotopTheme {
@@ -96,7 +107,14 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshStatus()
-        refreshAnalytics()
+        refreshAnalytics(showLoading = true)
+        refreshHandler.removeCallbacks(analyticsRefreshRunnable)
+        refreshHandler.postDelayed(analyticsRefreshRunnable, ANALYTICS_REFRESH_INTERVAL_MS)
+    }
+
+    override fun onPause() {
+        refreshHandler.removeCallbacks(analyticsRefreshRunnable)
+        super.onPause()
     }
 
     private fun refreshStatus() {
@@ -105,9 +123,9 @@ class MainActivity : ComponentActivity() {
         screenTimeConfig = ScreenTimeSettings.read(this)
     }
 
-    private fun refreshAnalytics() {
+    private fun refreshAnalytics(showLoading: Boolean) {
         lifecycleScope.launch {
-            analyticsLoading = true
+            if (showLoading) analyticsLoading = true
             analyticsSummary = runCatching {
                 analyticsRepository.loadSummary()
             }.getOrElse {
@@ -172,7 +190,7 @@ class MainActivity : ComponentActivity() {
     private fun resetAnalytics() {
         lifecycleScope.launch {
             analyticsRepository.reset()
-            refreshAnalytics()
+            refreshAnalytics(showLoading = true)
         }
     }
 
@@ -181,6 +199,10 @@ class MainActivity : ComponentActivity() {
             startActivity(intent)
             true
         }.getOrDefault(false)
+
+    companion object {
+        private const val ANALYTICS_REFRESH_INTERVAL_MS = 3_000L
+    }
 }
 
 private enum class DashboardTab(val title: String) {
@@ -213,7 +235,8 @@ private fun DashboardScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 22.dp, vertical = 24.dp),
+                    .statusBarsPadding()
+                    .padding(start = 22.dp, end = 22.dp, top = 18.dp, bottom = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(

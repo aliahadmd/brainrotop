@@ -62,7 +62,17 @@ class ScreenTimeSessionControllerTest {
         assertTrue(blockActions.contains(ScreenTimeAction.ShowBlock))
     }
 
+    @Test
+    fun oneMinuteLimitShowsWarningImmediately() {
+        val controller = ScreenTimeSessionController()
+        val config = enabledConfig(limitMinutes = 1)
+        val startActions = controller.onScreenOn(0L, config)
+        val warningActions = controller.onWarningTimer(0L, config)
+
+        assertTrue(startActions.contains(ScreenTimeAction.ScheduleWarning(0L)))
+        assertTrue(warningActions.contains(ScreenTimeAction.ShowWarning))
+    }
+
     private fun enabledConfig(limitMinutes: Int = 5): ScreenTimeConfig =
         ScreenTimeConfig(enabled = true, limitMinutes = limitMinutes, warningEnabled = true)
 }
-
